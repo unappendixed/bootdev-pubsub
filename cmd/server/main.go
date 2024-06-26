@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+    "github.com/joho/godotenv"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/unappendixed/bootdevpubsub/internal/gamelogic"
@@ -11,12 +12,19 @@ import (
 	"github.com/unappendixed/bootdevpubsub/internal/routing"
 )
 
-const connstr string = "amqp://guest:guest@localhost:5672/"
 const logfilepath string = "server.log"
 
 var logger log.Logger
 
 func main() {
+
+    godotenv.Load(".env")
+
+    connstr, found := os.LookupEnv("RABBITMQ_CONN_STRING")
+    if !found {
+        panic("AMQP connection string not found!")
+    }
+
 	logfile, err := os.OpenFile(logfilepath, os.O_CREATE, os.FileMode(0666))
 	if err != nil {
 		panic(fmt.Errorf("Failed to open logfile %q: %w", logfilepath, err))
@@ -32,8 +40,28 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+    defer ch.Close()
 
-    _, err = ConnectLogs(ch)
+    err = pubsub.SubscribeGob[routing.GameLog](
+        conn,
+        routing.ExchangePerilTopic,
+        fmt.Sprintf("%s.*", routing.GameLogSlug),
+        "game_logs",
+        pubsub.QueueTypeDurable,
+        func(gl routing.GameLog) pubsub.AckType {
+            defer fmt.Print("> ")
+            err := gamelogic.WriteLog(gl)
+            if err != nil {
+                fmt.Println(err)
+                return pubsub.AckTypeNackRequeue
+            }
+            return pubsub.AckTypeAck
+        },
+    )
+    if err != nil {
+        panic(err)
+    }
+
     if err != nil {
         logger.Println("Failed to bind to game logs exchange")
     }
@@ -72,18 +100,4 @@ func main() {
             fmt.Printf("Unknown command: %q\n", input[0])
 		}
     }
-}
-
-func ConnectLogs(ch *amqp.Channel) (*amqp.Queue, error) {
-    queue, err := ch.QueueDeclare("game_logs", true, false, false, false, nil)
-    if err != nil {
-        return nil, err
-    }
-
-    err = ch.QueueBind(routing.GameLogSlug, routing.GameLogSlug + ".*", routing.ExchangePerilTopic, false, nil)
-    if err != nil {
-        return nil, err
-    }
-
-    return &queue, nil
 }
